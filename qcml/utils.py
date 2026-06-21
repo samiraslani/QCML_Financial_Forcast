@@ -28,7 +28,7 @@ def best_kmeans(X: np.ndarray, k: int, n_init: int = 30) -> np.ndarray:
 
 def align_labels(y_true: np.ndarray, y_pred: np.ndarray, k: int) -> np.ndarray:
     """
-    Permute predicted cluster indices to maximise agreement with y_true.
+    Permute predicted cluster indices to maximize agreement with y_true.
 
     Uses the Hungarian algorithm on the contingency matrix.
     Necessary because K-Means cluster numbering is arbitrary.
@@ -151,8 +151,8 @@ def make_gaussian_clusters(
 
     Returns
     -------
-    X : shape (k * n_per_class, d) — standardised
-    y : shape (k * n_per_class,)  — integer labels 0..k-1
+    X : shape (k * n_per_class, d): standardized
+    y : shape (k * n_per_class,) : integer labels 0..k-1
     """
     from sklearn.preprocessing import StandardScaler
 

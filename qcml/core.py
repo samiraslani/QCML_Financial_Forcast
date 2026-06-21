@@ -1,7 +1,7 @@
 """
 qcml/core.py
 ------------
-Quantum Cognition Machine Learning (QCML) — canonical implementation.
+Quantum Cognition Machine Learning (QCML): canonical implementation.
 
 Reference
 ---------
@@ -15,7 +15,7 @@ Hamiltonian built from D learned Hermitian observables {A_1, ..., A_D}:
 
     H(x) = sum_k (A_k - x_k * I)^2
 
-The ground state minimises the loss:
+The ground state minimizes the loss:
 
     L(x) = lambda_0(H(x))
           = (1/2) * ||<A>_psi - x||^2  +  (1/2) * sum_k Var_psi(A_k)
@@ -56,7 +56,7 @@ def ground_state(
     observables: List[np.ndarray],
 ) -> Tuple[float, np.ndarray]:
     """
-    Return (lambda_0, |psi_0>) — smallest eigenvalue and eigenvector of H(x).
+    Return (lambda_0, |psi_0>): smallest eigenvalue and eigenvector of H(x).
 
     Sign convention: the component with the largest absolute value is made
     positive, removing the global +/-1 phase ambiguity before downstream
@@ -125,8 +125,8 @@ class QCML:
     w : float in [0, 1]
         Variance weight. The loss is:
             L_w = lambda_0 - (1 - w) * sum_k Var_psi(A_k)
-        w=1.0 : minimise full ground-state energy (default, max compression)
-        w=0.0 : minimise bias only, maximise variance (max spread on sphere)
+        w=1.0 : minimize full ground-state energy (default, max compression)
+        w=0.0 : minimize bias only, maximize variance (max spread on sphere)
         w=0.25: empirically best for linear separability (see experiments)
     seed : int
         Random seed for reproducibility.
@@ -160,7 +160,7 @@ class QCML:
 
     def _init_observables(self, D: int, X: np.ndarray) -> None:
         """
-        Initialise observables with eigenvalues spanning each feature's range.
+        Initialize observables with eigenvalues spanning each feature's range.
         This gives the gradient a strong starting signal rather than fighting
         a near-zero random initialisation.
         """
@@ -208,7 +208,7 @@ class QCML:
 
         Parameters
         ----------
-        X : array of shape (N, D) — standardised input features
+        X : array of shape (N, D): standardized input features
         epochs : number of full passes over X
         batch_size : mini-batch size
         verbose : print loss every 50 epochs
@@ -352,3 +352,357 @@ class QCML:
             )
             gaps.append(float(vals[1] - vals[0]))
         return np.array(gaps)
+
+    # ------------------------------------------------------------------
+    # Quantum similarity and geometry
+    # ------------------------------------------------------------------
+
+    def fidelity(self, x1: np.ndarray, x2: np.ndarray) -> float:
+        """
+        QCML fidelity between two data points: |<psi0(x1)|psi0(x2)>|^2.
+
+        Range [0, 1]. Values near 1 indicate quantum-mechanically similar
+        data points; values near 0 indicate distinct quantum encodings.
+
+        Reference: [Q3] Rosaler et al. 2025, Section 2.3
+        """
+        _, psi1 = ground_state(x1, self.observables)
+        _, psi2 = ground_state(x2, self.observables)
+        return float((psi1 @ psi2) ** 2)
+
+    def fidelity_matrix(self, X: np.ndarray) -> np.ndarray:
+        """
+        Pairwise QCML fidelity matrix F_ij = |<psi0(x_i)|psi0(x_j)>|^2.
+
+        Shape (N, N). Computed efficiently via Z @ Z.T where Z = transform(X).
+        Result is symmetric with ones on the diagonal.
+
+        Reference: [Q3] Rosaler et al. 2025
+        """
+        Z = self.transform(X)   # (N, m), rows are unit vectors
+        F = Z @ Z.T             # (N, N), inner products in [-1, 1]
+        return F ** 2           # (N, N), fidelities in [0, 1]
+
+    def quantum_metric(self, x: np.ndarray) -> np.ndarray:
+        """
+        D x D quantum metric tensor g at data point x.
+
+            g_munu(x) = 2 * sum_{n>=1}
+                <psi0|A_mu|psi_n> <psi_n|A_nu|psi0> / (E_n - E0)
+
+        Computed efficiently as g = 2 * a @ G @ a.T where:
+          - a[mu, :] = A_mu @ psi0       (D x m)
+          - G = sum_{n>=1} outer(psi_n, psi_n) / (E_n - E0)  (m x m)
+
+        The eigenvalue spectrum of the mean quantum metric (averaged over X)
+        reveals the intrinsic dimension of the data manifold via a spectral
+        gap at position d (the true dimension).
+
+        NOTE: this is distinct from spectral_gaps(), which computes
+        lambda_1 - lambda_0 of H(x) (a Hamiltonian energy gap, not a
+        geometric object).
+
+        Reference: [Q4] Candelori et al. 2025, [Q5] Abanov et al. 2025
+        """
+        vals, vecs = eigh(build_hamiltonian(x, self.observables))
+        psi0 = vecs[:, 0]
+        E0 = vals[0]
+
+        # a_mu = A_mu @ psi0 for all mu  (D, m)
+        a = np.array([A @ psi0 for A in self.observables])
+
+        # Green's function G = sum_{n>=1} outer(psi_n, psi_n) / (E_n - E0)
+        G = np.zeros((self.m, self.m))
+        for n in range(1, self.m):
+            dE = vals[n] - E0
+            if dE < 1e-10:
+                continue
+            G += np.outer(vecs[:, n], vecs[:, n]) / dE
+
+        return 2.0 * a @ G @ a.T   # (D, D)
+
+    def mean_quantum_metric(
+        self,
+        X: np.ndarray,
+        n_samples: int = 100,
+    ) -> np.ndarray:
+        """
+        D x D quantum metric averaged over n_samples data points from X.
+
+        Use the eigenvalues of this matrix to estimate intrinsic dimension:
+        look for a spectral gap separating the top-d eigenvalues from the rest.
+
+        Reference: [Q4] Candelori et al. 2025
+        """
+        rng = np.random.default_rng(0)
+        idx = rng.choice(len(X), size=min(n_samples, len(X)), replace=False)
+        G = np.zeros((self.D, self.D))
+        for i in idx:
+            G += self.quantum_metric(X[i])
+        return G / len(idx)
+
+    def commutativity(self) -> np.ndarray:
+        """
+        D x D matrix of Frobenius norms ||[A_j, A_k]||_F.
+
+        Near-zero values indicate the observables nearly commute, which is
+        the classical (k-means) limit. Large values indicate non-classical
+        quantum correlations between features.
+
+        As w -> 1, commutativity should decay toward zero.
+        """
+        D = self.D
+        C = np.zeros((D, D))
+        for j in range(D):
+            for k in range(j + 1, D):
+                comm = self.observables[j] @ self.observables[k] \
+                     - self.observables[k] @ self.observables[j]
+                val = float(np.linalg.norm(comm, 'fro'))
+                C[j, k] = val
+                C[k, j] = val
+        return C
+
+
+# ---------------------------------------------------------------------------
+# Supervised QCML extensions
+# ---------------------------------------------------------------------------
+
+class QCMLRegressor(QCML):
+    """
+    QCML for regression via a learnable Hermitian output operator.
+
+    Two-phase training
+    ------------------
+    Phase 1 (unsupervised):
+        Call fit(X): standard Hamiltonian learning.
+
+    Phase 2 (supervised):
+        Call fit_output_operator(X, y): freezes observables and learns a
+        Hermitian output operator B such that
+
+            y_hat(x) = <psi0(x)|B|psi0(x)>
+
+        minimizes MSE(y_hat, y) via Adam gradient descent.
+
+    The decoupled strategy avoids backpropagating through the eigenvalue
+    problem and is stable for all tested datasets.
+
+    Gradient of MSE w.r.t. B (exact via Hellmann-Feynman):
+        dL/dB = 2 (y_hat - y) |psi0><psi0|
+    """
+
+    def __init__(
+        self,
+        hilbert_dim: int = 16,
+        lr: float = 3e-3,
+        w: float = 1.0,
+        seed: int = 42,
+    ) -> None:
+        super().__init__(hilbert_dim, lr, w, seed)
+        self.B: Optional[np.ndarray] = None
+        self._B_adam_m: Optional[np.ndarray] = None
+        self._B_adam_v: Optional[np.ndarray] = None
+        self._B_adam_t: int = 0
+
+    def _init_B(self, y_range: Tuple[float, float]) -> None:
+        lo, hi = y_range
+        eigs = np.linspace(lo, hi, self.m)
+        Q, _ = np.linalg.qr(self.rng.standard_normal((self.m, self.m)))
+        self.B = Q @ np.diag(eigs) @ Q.T
+        self._B_adam_m = np.zeros((self.m, self.m))
+        self._B_adam_v = np.zeros((self.m, self.m))
+
+    def predict_one(self, x: np.ndarray) -> float:
+        _, psi0 = ground_state(x, self.observables)
+        return float(psi0 @ self.B @ psi0)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Predict regression target for each row of X.  Shape (N,)."""
+        return np.array([self.predict_one(x) for x in X])
+
+    def fit_output_operator(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        epochs: int = 200,
+        batch_size: int = 32,
+        verbose: bool = True,
+    ) -> "QCMLRegressor":
+        """
+        Phase 2: learn B with frozen observables.
+
+        Must be called after fit() has already trained the observables.
+        """
+        y = np.asarray(y, dtype=float)
+        if self.B is None:
+            self._init_B((float(y.min()), float(y.max())))
+
+        beta1, beta2, eps = 0.9, 0.999, 1e-8
+
+        for ep in range(epochs):
+            perm = self.rng.permutation(len(X))
+            ep_loss = 0.0
+
+            for start in range(0, len(X), batch_size):
+                idx = perm[start:start + batch_size]
+                batch_X, batch_y = X[idx], y[idx]
+                grad_B = np.zeros((self.m, self.m))
+                b_loss = 0.0
+
+                for xi, yi in zip(batch_X, batch_y):
+                    _, psi0 = ground_state(xi, self.observables)
+                    y_hat = float(psi0 @ self.B @ psi0)
+                    res = y_hat - float(yi)
+                    b_loss += res ** 2
+                    grad_B += 2.0 * res * np.outer(psi0, psi0)
+
+                n = len(batch_X)
+                self._B_adam_t += 1
+                t = self._B_adam_t
+                g = grad_B / n
+                self._B_adam_m = beta1 * self._B_adam_m + (1 - beta1) * g
+                self._B_adam_v = beta2 * self._B_adam_v + (1 - beta2) * g ** 2
+                mh = self._B_adam_m / (1 - beta1 ** t)
+                vh = self._B_adam_v / (1 - beta2 ** t)
+                self.B -= self.lr * mh / (np.sqrt(vh) + eps)
+                self.B = 0.5 * (self.B + self.B.T)   # re-symmetrise
+                ep_loss += b_loss
+
+            if verbose and (ep + 1) % 50 == 0:
+                print(f"  epoch {ep+1:4d}/{epochs}   MSE = {ep_loss / len(X):.4f}")
+
+        return self
+
+
+class QCMLClassifier(QCML):
+    """
+    QCML for classification via quantum measurement operators.
+
+    Two-phase training
+    ------------------
+    Phase 1 (unsupervised):
+        Call fit(X): standard Hamiltonian learning.
+
+    Phase 2 (supervised):
+        Call fit_measurement_operators(X, y): freezes observables and learns
+        C measurement vectors w_i (rows of matrix W, shape C x m) via
+        cross-entropy loss on the quantum-measurement probabilities:
+
+            p_i(x) = (w_i . psi0(x))^2 / sum_j (w_j . psi0(x))^2
+
+    Physical interpretation
+    -----------------------
+    Each w_i is a measurement direction in Hilbert space. The squared
+    projection (w_i . psi)^2 is the Born-rule probability for measuring
+    outcome i given state |psi>. The renormalisation enforces p_i >= 0
+    and sum_i p_i = 1 exactly without a softmax layer.
+
+    Gradient of L = -log(scores[c] / S) w.r.t. w_i (exact):
+        dL/dw[c]   = (1/S - 1/scores[c]) * 2 * dots[c] * psi0
+        dL/dw[i]   = (1/S)               * 2 * dots[i] * psi0   (i != c)
+    where scores[i] = (w_i . psi0)^2, S = sum(scores), c = true class.
+
+    Reference: [Q1] Musaelian et al. 2024, Section 4
+    """
+
+    def __init__(
+        self,
+        hilbert_dim: int = 16,
+        lr: float = 3e-3,
+        w: float = 1.0,
+        seed: int = 42,
+    ) -> None:
+        super().__init__(hilbert_dim, lr, w, seed)
+        self.W: Optional[np.ndarray] = None   # (C, m) measurement vectors
+        self._W_adam_m: Optional[np.ndarray] = None
+        self._W_adam_v: Optional[np.ndarray] = None
+        self._W_adam_t: int = 0
+        self.C: int = 0
+
+    def _init_W(self, C: int) -> None:
+        self.C = C
+        raw = self.rng.standard_normal((self.m, self.m))
+        Q, _ = np.linalg.qr(raw)
+        self.W = Q[:C, :]          # first C rows of orthonormal basis
+        self._W_adam_m = np.zeros((C, self.m))
+        self._W_adam_v = np.zeros((C, self.m))
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """
+        Quantum measurement probabilities.  Shape (N, C).
+        Each row sums to exactly 1; all entries in [0, 1].
+        """
+        proba = []
+        for x in X:
+            _, psi0 = ground_state(x, self.observables)
+            scores = (self.W @ psi0) ** 2    # (C,), always >= 0
+            S = scores.sum() + 1e-12
+            proba.append(scores / S)
+        return np.array(proba)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Predicted class labels.  Shape (N,)."""
+        return np.argmax(self.predict_proba(X), axis=1)
+
+    def fit_measurement_operators(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        epochs: int = 200,
+        batch_size: int = 32,
+        verbose: bool = True,
+    ) -> "QCMLClassifier":
+        """
+        Phase 2: learn measurement vectors W with frozen observables.
+
+        Must be called after fit() has already trained the observables.
+        """
+        y = np.asarray(y, dtype=int)
+        C = int(y.max()) + 1
+        if self.W is None:
+            self._init_W(C)
+
+        beta1, beta2, eps = 0.9, 0.999, 1e-8
+
+        for ep in range(epochs):
+            perm = self.rng.permutation(len(X))
+            ep_loss = 0.0
+
+            for start in range(0, len(X), batch_size):
+                idx = perm[start:start + batch_size]
+                batch_X, batch_y = X[idx], y[idx]
+                grad_W = np.zeros((self.C, self.m))
+                b_loss = 0.0
+
+                for xi, yi in zip(batch_X, batch_y):
+                    _, psi0 = ground_state(xi, self.observables)
+                    dots = self.W @ psi0            # (C,)
+                    scores = dots ** 2              # (C,), >= 0
+                    S = scores.sum() + 1e-10
+
+                    b_loss -= np.log(scores[yi] / S + 1e-10)
+
+                    # Gradient of L = -log(scores[c]) + log(S)
+                    dL_dscores = np.full(self.C, 1.0 / S)
+                    dL_dscores[yi] -= 1.0 / (scores[yi] + 1e-10)
+
+                    # dL/dw[i] = dL/dscores[i] * d(dots[i]^2)/dw[i]
+                    #           = dL/dscores[i] * 2 * dots[i] * psi0
+                    for i in range(self.C):
+                        grad_W[i] += dL_dscores[i] * 2.0 * dots[i] * psi0
+
+                n = len(batch_X)
+                self._W_adam_t += 1
+                t = self._W_adam_t
+                g = grad_W / n
+                self._W_adam_m = beta1 * self._W_adam_m + (1 - beta1) * g
+                self._W_adam_v = beta2 * self._W_adam_v + (1 - beta2) * g ** 2
+                mh = self._W_adam_m / (1 - beta1 ** t)
+                vh = self._W_adam_v / (1 - beta2 ** t)
+                self.W -= self.lr * mh / (np.sqrt(vh) + eps)
+                ep_loss += b_loss
+
+            if verbose and (ep + 1) % 50 == 0:
+                print(f"  epoch {ep+1:4d}/{epochs}   CE loss = {ep_loss / len(X):.4f}")
+
+        return self

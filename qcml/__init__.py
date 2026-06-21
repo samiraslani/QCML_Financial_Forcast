@@ -1,5 +1,5 @@
 """
-QCML — Quantum Cognition Machine Learning
+QCML: Quantum Cognition Machine Learning
 ==========================================
 A quantum-inspired unsupervised representation learning framework.
 
